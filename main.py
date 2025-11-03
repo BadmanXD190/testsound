@@ -99,7 +99,7 @@ async function ensureModel() {{
   }}
 }}
 
-async function startListening() {
+async function startListening() {{
   if (listening) return;
   try {
     mqttConnect();  // ensure MQTT first
