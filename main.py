@@ -1,61 +1,49 @@
 import streamlit as st
 
-MODEL_ID  = "6_YbLoW0i"
-DEVICE_ID = "robotcar_umk1"
+MODEL_ID  = "6_YbLoW0i"                 
+DEVICE_ID = "robotcar_umk1"             
 BROKER_WS = "wss://test.mosquitto.org:8081/mqtt"
 TOPIC_CMD = f"rc/{DEVICE_ID}/cmd"
-SEND_INTERVAL_MS = 1000
 
-st.set_page_config(page_title="TM Audio → ESP32 via MQTT", layout="centered")
-st.title("🎤 Teachable Machine (Audio) → ESP32 Robot Car")
+st.set_page_config(page_title="TM Audio (Speech Commands) → ESP32", layout="centered")
+st.title("🎤 Teachable Machine Audio → ESP32 Robot Car")
+st.caption("Click Start Listening to recognize your trained voice commands and send class label (F/B/L/R/S) to MQTT.")
 
-html_template = """
+html = """
 <div style="font-family:system-ui,Segoe UI,Roboto,Arial">
   <button id="toggle" style="padding:10px 16px;border-radius:10px;">Start Listening</button>
   <div id="status" style="margin:10px 0;font-weight:600;">Idle</div>
-  <div id="label" style="margin-top:12px;font-size:44px;font-weight:900;">—</div>
+  <div id="label" style="margin-top:12px;font-size:36px;font-weight:900;">—</div>
   <div style="margin-top:8px;font-size:12px;opacity:.7;">
     Publishes to <code>{topic}</code> on <code>{broker}</code>
   </div>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4"></script>
-<script src="https://cdn.jsdelivr.net/npm/@teachablemachine/audio@0.8/dist/teachablemachine-audio.min.js"
-        onload="window.tmAudio = window.tmAudio || window.teachablemachine.audio;"></script>
+<!-- TensorFlow.js + Speech Commands -->
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@1.3.1/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/speech-commands@0.4.0/dist/speech-commands.min.js"></script>
+
+<!-- MQTT.js -->
 <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
 
 <script>
-const MODEL_URL   = "https://teachablemachine.withgoogle.com/models/{model_id}/";
-const MQTT_URL    = "{broker}";
-const TOPIC       = "{topic}";
-const INTERVAL_MS = {interval};
-
-let model = null;
-let mic = null;
-let mqttClient = null;
+const MODEL_URL = "https://teachablemachine.withgoogle.com/models/{model_id}/";
+const MQTT_URL  = "{broker}";
+const TOPIC     = "{topic}";
+const PROB_THRESHOLD = 0.75;
+let recognizer = null;
 let listening = false;
-let rafId = null;
+let mqttClient = null;
 let lastLabel = "";
 let lastSent = 0;
+const INTERVAL_MS = 1000;
 
-function setStatus(s) {{
-  document.getElementById("status").textContent = s;
-  console.log("[status]", s);
-}}
-
-function setButton() {{
-  const b = document.getElementById("toggle");
-  if (!b) return;
-  b.textContent = listening ? "Stop Listening" : "Start Listening";
-  b.style.background = listening ? "#c62828" : "#2e7d32";
-  b.style.color = "white";
-}}
-
+// === MQTT ===
 function mqttConnect() {{
   if (mqttClient && mqttClient.connected) return;
-  setStatus("Connecting MQTT…");
+  document.getElementById("status").innerText = "Connecting MQTT…";
   mqttClient = mqtt.connect(MQTT_URL, {{
-    clientId: "tm-audio-" + Math.random().toString(16).slice(2,10),
+    clientId: "tm-speech-" + Math.random().toString(16).slice(2,10),
     clean: true,
     reconnectPeriod: 2000
   }});
@@ -67,70 +55,57 @@ function mqttConnect() {{
 function mqttPublish(label) {{
   if (!mqttClient || !mqttClient.connected) return;
   mqttClient.publish(TOPIC, label, {{ qos: 0, retain: false }});
+  console.log("Published", label);
 }}
 
-async function ensureModel() {{
-  if (!window.tmAudio) {{
-    setStatus("Loading audio runtime…");
-    await new Promise(res => {{
-      const chk = setInterval(() => {{
-        if (window.tmAudio) {{ clearInterval(chk); res(); }}
-      }}, 150);
-    }});
-  }}
-  if (!model) {{
-    setStatus("Loading audio model…");
-    const modelURL = MODEL_URL + "model.json";
-    const metadataURL = MODEL_URL + "metadata.json";
-    model = await window.tmAudio.load(modelURL, metadataURL);
-  }}
+function setStatus(msg) {{
+  document.getElementById("status").innerText = msg;
+  console.log("[status]", msg);
+}}
+
+function setButton() {{
+  const btn = document.getElementById("toggle");
+  btn.textContent = listening ? "Stop Listening" : "Start Listening";
+  btn.style.background = listening ? "#c62828" : "#2e7d32";
+  btn.style.color = "white";
+}}
+
+async function createModel() {{
+  const checkpointURL = MODEL_URL + "model.json";
+  const metadataURL = MODEL_URL + "metadata.json";
+  recognizer = speechCommands.create("BROWSER_FFT", undefined, checkpointURL, metadataURL);
+  await recognizer.ensureModelLoaded();
+  setStatus("Model loaded");
 }}
 
 async function startListening() {{
-  if (listening) return;
-  try {{
-    mqttConnect();
-    await ensureModel();
-    setStatus("Requesting microphone… (please allow)");
-    if (!mic) mic = new window.tmAudio.Microphone();
-    await mic.setup();
-    await mic.play();
-    listening = true;
-    setButton();
-    setStatus("Listening…");
-    loop();
-  }} catch (err) {{
-    console.error(err);
-    setStatus("Init error: " + err.message);
-  }}
-}}
-
-function stopListening() {{
-  if (!listening) return;
-  listening = false;
+  mqttConnect();
+  if (!recognizer) await createModel();
+  const labels = recognizer.wordLabels();
+  setStatus("Listening… (allow microphone)");
+  listening = true;
   setButton();
-  if (rafId) cancelAnimationFrame(rafId);
-  if (mic) try {{ mic.stop(); }} catch(_) {{}}
-  setStatus("Stopped (MQTT still connected)");
+
+  recognizer.listen(result => {{
+    const scores = result.scores;
+    let topIndex = 0;
+    for (let i = 1; i < scores.length; i++) {{
+      if (scores[i] > scores[topIndex]) topIndex = i;
+    }}
+    const label = labels[topIndex].trim().toUpperCase();
+    const prob = scores[topIndex];
+    document.getElementById("label").innerText = label + " (" + prob.toFixed(2) + ")";
+    maybePublish(label, prob);
+  }}, {{
+    includeSpectrogram: false,
+    probabilityThreshold: PROB_THRESHOLD,
+    overlapFactor: 0.5
+  }});
 }}
 
-async function loop() {{
-  if (!listening) return;
-  try {{
-    const preds = await model.predict(mic);
-    preds.sort((a,b)=>b.probability-a.probability);
-    const label = (preds[0].className || "").trim().toUpperCase();
-    document.getElementById("label").textContent = label || "—";
-    maybePublish(label);
-  }} catch (e) {{
-    console.error("predict error", e);
-  }}
-  rafId = requestAnimationFrame(loop);
-}}
-
-function maybePublish(label) {{
-  if (!label) return;
+function maybePublish(label, prob) {{
   const now = Date.now();
+  if (prob < PROB_THRESHOLD) return;
   if (label !== lastLabel || now - lastSent > INTERVAL_MS) {{
     mqttPublish(label);
     setStatus("Sent: " + label);
@@ -139,14 +114,19 @@ function maybePublish(label) {{
   }}
 }}
 
+function stopListening() {{
+  if (!listening) return;
+  recognizer.stopListening();
+  listening = false;
+  setButton();
+  setStatus("Stopped (MQTT still connected)");
+}}
+
 document.getElementById("toggle").addEventListener("click", () => {{
   if (listening) stopListening();
   else startListening();
 }});
 </script>
-"""
-
-html = html_template.format(model_id=MODEL_ID, broker=BROKER_WS,
-                            topic=TOPIC_CMD, interval=SEND_INTERVAL_MS)
+""".format(model_id=MODEL_ID, broker=BROKER_WS, topic=TOPIC_CMD)
 
 st.components.v1.html(html, height=420)
