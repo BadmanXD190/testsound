@@ -99,28 +99,30 @@ async function ensureModel() {{
   }}
 }}
 
-async function startListening() {{
+async function startListening() {
   if (listening) return;
-  try {{
-    mqttConnect();  // ensure connection before starting
+  try {
+    mqttConnect();  // ensure MQTT first
     await ensureModel();
 
-    if (!mic) {{
-      setStatus("Requesting microphone…");
+    // Force microphone permission request
+    setStatus("Requesting microphone… (please allow)");
+    if (!mic) {
       mic = new window.tmAudio.Microphone();
-      await mic.setup();
-    }}
+    }
+    await mic.setup();   // <-- triggers browser permission prompt
     await mic.play();
 
     listening = true;
     setButton();
     setStatus("Listening…");
     loop();
-  }} catch (err) {{
+  } catch (err) {
     console.error(err);
     setStatus("Init error: " + err.message);
-  }}
-}}
+  }
+}
+
 
 function stopListening() {{
   if (!listening) return;
