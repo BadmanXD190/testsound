@@ -10,7 +10,7 @@ SEND_INTERVAL_MS = 1000                 # throttle MQTT publishes (ms)
 
 st.set_page_config(page_title="TM Audio → ESP32 via MQTT", layout="centered")
 st.title("🎤 Teachable Machine (Audio) → ESP32 Robot Car")
-st.caption("Click Start Listening to classify audio in the browser and send only the class label (F/B/L/R/S) to MQTT.")
+st.caption("Click Start Listening to classify audio in real time and send only the class label (F/B/L/R/S) to your ESP32 via MQTT.")
 
 html = f"""
 <div style="font-family:system-ui,Segoe UI,Roboto,Arial">
@@ -45,6 +45,7 @@ let rafId = null;
 let lastLabel = "";
 let lastSent = 0;
 
+// === UI ===
 function setStatus(s) {{
   const el = document.getElementById("status");
   if (el) el.textContent = s;
@@ -55,8 +56,11 @@ function setButton() {{
   const b = document.getElementById("toggle");
   if (!b) return;
   b.textContent = listening ? "Stop Listening" : "Start Listening";
+  b.style.background = listening ? "#c62828" : "#2e7d32";
+  b.style.color = "white";
 }}
 
+// === MQTT ===
 function mqttConnect() {{
   if (mqttClient && mqttClient.connected) return;
   setStatus("Connecting MQTT…");
@@ -70,15 +74,15 @@ function mqttConnect() {{
   mqttClient.on("error", (e) => setStatus("MQTT error: " + e.message));
 }}
 
-function mqttDisconnect() {{
-  if (mqttClient) {{
-    try {{ mqttClient.end(true); }} catch (_) {{}}
-    mqttClient = null;
-  }}
+function mqttPublish(label) {{
+  if (!mqttClient || !mqttClient.connected) return;
+  mqttClient.publish(TOPIC, label, {{ qos: 0, retain: false }});
+  console.log("Published", label, "to", TOPIC);
 }}
 
+// === TM Audio ===
 async function ensureModel() {{
-  // Wait for tmAudio to be available
+  // Wait for tmAudio
   if (!window.tmAudio) {{
     setStatus("Loading audio runtime…");
     await new Promise(resolve => {{
@@ -98,6 +102,7 @@ async function ensureModel() {{
 async function startListening() {{
   if (listening) return;
   try {{
+    mqttConnect();  // ensure connection before starting
     await ensureModel();
 
     if (!mic) {{
@@ -107,7 +112,6 @@ async function startListening() {{
     }}
     await mic.play();
 
-    mqttConnect();
     listening = true;
     setButton();
     setStatus("Listening…");
@@ -119,12 +123,12 @@ async function startListening() {{
 }}
 
 function stopListening() {{
+  if (!listening) return;
   listening = false;
   setButton();
   if (rafId) cancelAnimationFrame(rafId);
   if (mic) {{ try {{ mic.stop(); }} catch(_) {{}} }}
-  mqttDisconnect();
-  setStatus("Stopped");
+  setStatus("Stopped (MQTT still connected)");
 }}
 
 async function loop() {{
@@ -132,27 +136,27 @@ async function loop() {{
   try {{
     const preds = await model.predict(mic);
     preds.sort((a,b)=>b.probability-a.probability);
-    const label = (preds[0].className || "").trim().toUpperCase(); // e.g., "F"
+    const label = (preds[0].className || "").trim().toUpperCase(); // e.g. F/B/L/R/S
     document.getElementById("label").textContent = label || "—";
-    maybePublish(label);
+    publishIfNeeded(label);
   }} catch (e) {{
     console.error("predict error", e);
   }}
   rafId = requestAnimationFrame(loop);
 }}
 
-function maybePublish(label) {{
+function publishIfNeeded(label) {{
   if (!label) return;
-  if (!mqttClient || !mqttClient.connected) return;
   const now = Date.now();
   if (label !== lastLabel || now - lastSent > INTERVAL_MS) {{
-    mqttClient.publish(TOPIC, label, {{ qos: 0, retain: false }});
+    mqttPublish(label);
     setStatus("Sent: " + label);
     lastLabel = label;
     lastSent = now;
   }}
 }}
 
+// === BUTTON TOGGLE ===
 document.getElementById("toggle").addEventListener("click", () => {{
   if (listening) stopListening();
   else startListening();
