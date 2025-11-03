@@ -1,16 +1,16 @@
 import streamlit as st
 
 # ========= CONFIG =========
-MODEL_ID  = "6_YbLoW0i"                 # your Teachable Machine AUDIO model id
+MODEL_ID  = "6_YbLoW0i"                 # <-- your TM audio model id
 DEVICE_ID = "robotcar_umk1"             # must match ESP code
 BROKER_WS = "wss://test.mosquitto.org:8081/mqtt"
 TOPIC_CMD = f"rc/{DEVICE_ID}/cmd"
-SEND_INTERVAL_MS = 1000                 # avoid flooding broker (1 msg/sec)
+SEND_INTERVAL_MS = 1000                 # throttle MQTT publishes
 # ==========================
 
 st.set_page_config(page_title="TM Audio → ESP32 via MQTT", layout="centered")
 st.title("🎤 Teachable Machine (Audio) → ESP32 Robot Car")
-st.caption("Predicts in the browser and publishes only the class label to MQTT.")
+st.caption("Recognizes your trained voice commands and sends single-letter MQTT commands (F/B/L/R/S) to your ESP32 robot car.")
 
 html = f"""
 <div style="font-family:system-ui,Segoe UI,Roboto,Arial">
@@ -22,9 +22,9 @@ html = f"""
   </div>
 </div>
 
-<!-- TF.js + Teachable Machine Audio -->
+<!-- TF.js and Teachable Machine Audio -->
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4"></script>
-<script src="https://cdn.jsdelivr.net/npm/@teachablemachine/audio@0.8/dist/teachablemachine-audio.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@teachablemachine/audio@0.8/dist/teachablemachine-audio.min.js" onload="window.tmAudio = window.tmAudio || window.teachablemachine.audio;"></script>
 
 <!-- MQTT.js -->
 <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
@@ -40,10 +40,10 @@ let mqttClient = null;
 let lastLabel = "";
 let lastSent = 0;
 
-function setStatus(s) {{
+function setStatus(msg) {{
   const el = document.getElementById("status");
-  if (el) el.textContent = s;
-  console.log("[status]", s);
+  if (el) el.textContent = msg;
+  console.log("[status]", msg);
 }}
 
 function mqttConnect() {{
@@ -60,13 +60,26 @@ function mqttConnect() {{
 
 async function init() {{
   try {{
+    // Wait until tmAudio is available
+    if (!window.tmAudio) {{
+      setStatus("Waiting for tmAudio to load…");
+      await new Promise(resolve => {{
+        const check = setInterval(() => {{
+          if (window.tmAudio) {{
+            clearInterval(check);
+            resolve();
+          }}
+        }}, 200);
+      }});
+    }}
+
     setStatus("Loading audio model…");
     const modelURL = MODEL_URL + "model.json";
     const metadataURL = MODEL_URL + "metadata.json";
-    model = await tmAudio.load(modelURL, metadataURL);
+    model = await window.tmAudio.load(modelURL, metadataURL);
 
-    setStatus("Requesting microphone permission…");
-    mic = new tmAudio.Microphone();
+    setStatus("Starting microphone…");
+    mic = new window.tmAudio.Microphone();
     await mic.setup();
     await mic.play();
 
@@ -74,8 +87,8 @@ async function init() {{
     setStatus("Listening…");
     window.requestAnimationFrame(loop);
   }} catch (err) {{
-    setStatus("Init error: " + err.message);
     console.error(err);
+    setStatus("Init error: " + err.message);
   }}
 }}
 
@@ -83,26 +96,24 @@ async function loop() {{
   try {{
     const preds = await model.predict(mic);
     preds.sort((a,b)=>b.probability-a.probability);
-    const label = (preds[0].className || "").trim().toUpperCase(); // "F","B","L","R","S"
+    const label = (preds[0].className || "").trim().toUpperCase();
     document.getElementById("label").textContent = label;
-    maybePublish(label);
+    publishIfNeeded(label);
   }} catch (e) {{
     console.error("predict error", e);
   }}
   window.requestAnimationFrame(loop);
 }}
 
-function maybePublish(label) {{
+function publishIfNeeded(label) {{
   if (!mqttClient || !mqttClient.connected) return;
   const now = Date.now();
   if (label && (label !== lastLabel || now - lastSent > INTERVAL_MS)) {{
-    mqttClient.publish(TOPIC, label, {{ qos: 0, retain: false }}, (err) => {{
-      if (err) setStatus("Publish error: " + err.message);
-      else setStatus("Sent: " + label);
-    }});
+    mqttClient.publish(TOPIC, label, {{ qos: 0, retain: false }});
+    setStatus("Sent: " + label);
     lastLabel = label;
     lastSent = now;
-    console.log("Published", label, "->", TOPIC);
+    console.log("Published", label, "to", TOPIC);
   }}
 }}
 
@@ -110,4 +121,4 @@ document.getElementById("start").addEventListener("click", init);
 </script>
 """
 
-st.components.v1.html(html, height=380)
+st.components.v1.html(html, height=400)
